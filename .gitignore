@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+_rapidpass_apk
+_rapidpass_smali
+_rapidpass_tmp.zip
+_rapidpass_classes1.dump.txt
+_rapidpass_classes2.txt
+split_config.arm64_v8a.apk
+_rapidpass_arm64.zip
+_rapidpass_arm64

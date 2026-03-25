@@ -21,6 +21,8 @@ class MainActivity : AppCompatActivity() {
     private var lastCardType: String? = null
     private var lastSeenAt: Long = 0L
     private var lastReaderName: String? = null
+    private var lastBalance: String? = null
+    private var lastJourney: String? = null
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -34,6 +36,8 @@ class MainActivity : AppCompatActivity() {
                 cardType = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_CARD_TYPE),
                 seenAt = intent.getLongExtra(NfcBridgeService.EXTRA_LAST_SEEN_AT, 0L),
                 readerName = intent.getStringExtra(NfcBridgeService.EXTRA_READER_NAME),
+                balance = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_BALANCE),
+                journey = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_JOURNEY),
                 message = intent.getStringExtra(NfcBridgeService.EXTRA_STATUS_MESSAGE)
                     ?: getString(R.string.status_idle)
             )
@@ -81,6 +85,8 @@ class MainActivity : AppCompatActivity() {
             cardType = null,
             seenAt = 0L,
             readerName = null,
+            balance = null,
+            journey = null,
             message = getString(R.string.status_idle)
         )
     }
@@ -121,6 +127,8 @@ class MainActivity : AppCompatActivity() {
         cardType: String?,
         seenAt: Long,
         readerName: String?,
+        balance: String?,
+        journey: String?,
         message: String
     ) {
         lastUid = uid
@@ -128,6 +136,8 @@ class MainActivity : AppCompatActivity() {
         lastCardType = cardType
         lastSeenAt = seenAt
         lastReaderName = readerName
+        lastBalance = balance
+        lastJourney = journey
 
         binding.tvServiceValue.text = if (serviceRunning) {
             getString(R.string.service_running)
@@ -167,6 +177,8 @@ class MainActivity : AppCompatActivity() {
                 .putExtra(CardDetailsActivity.EXTRA_CARD_TYPE, lastCardType)
                 .putExtra(CardDetailsActivity.EXTRA_SEEN_AT, lastSeenAt)
                 .putExtra(CardDetailsActivity.EXTRA_READER_NAME, lastReaderName)
+                .putExtra(CardDetailsActivity.EXTRA_BALANCE, lastBalance)
+                .putExtra(CardDetailsActivity.EXTRA_JOURNEY, lastJourney)
         )
     }
 }
