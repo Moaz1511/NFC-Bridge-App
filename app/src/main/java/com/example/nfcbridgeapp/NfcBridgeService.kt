@@ -1,171 +1,234 @@
 package com.example.nfcbridgeapp
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
-import android.app.Service
-import android.content.BroadcastReceiver
-import android.content.Context
-import android.content.Intent
-import android.content.IntentFilter
+import android.app.*
+import android.content.*
 import android.content.pm.ServiceInfo
-import android.hardware.usb.UsbDevice
-import android.hardware.usb.UsbManager
-import android.os.Build
-import android.os.IBinder
-import android.os.Parcelable
+import android.hardware.usb.*
+import android.nfc.*
+import android.os.*
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import android.nfc.NdefMessage
-import android.nfc.NdefRecord
-import android.nfc.NfcAdapter
+import java.util.concurrent.Executors
 
-import com.skjolber.nfc.external.Acr122uDevice
-import com.skjolber.nfc.external.ExternalNfcDevice
-import com.skjolber.nfc.external.ExternalNfcDeviceListener
-import com.skjolber.nfc.external.ExternalNfcManager
-import com.skjolber.nfc.external.ExternalNfcProvider
-import com.skjolber.nfc.external.ExternalNfcTag
-import com.skjolber.nfc.external.ExternalNfcTagListener
-
-class NfcBridgeService : Service(), ExternalNfcTagListener {
+class NfcBridgeService : Service() {
 
     companion object {
         private const val TAG = "NfcBridgeService"
-        private const val NOTIFICATION_CHANNEL_ID = "NFC_SERVICE_CHANNEL"
+        private const val NOTIFICATION_CHANNEL_ID = "NFC_BRIDGE_CHANNEL"
         private const val NOTIFICATION_ID = 1
+        private const val ACTION_USB_PERMISSION = "com.example.nfcbridgeapp.USB_PERMISSION"
+        
+        // ACR122U IDs
+        private const val VID = 0x072F
+        private const val PID = 0x2200
+
         var isServiceRunning = false
     }
 
     private lateinit var usbManager: UsbManager
-    private var nfcProvider: ExternalNfcProvider? = null
-    private var externalNfcManager: ExternalNfcManager? = null
+    private var usbDevice: UsbDevice? = null
+    private var usbConnection: UsbDeviceConnection? = null
+    private var usbInterface: UsbInterface? = null
+    private var endpointIn: UsbEndpoint? = null
+    private var endpointOut: UsbEndpoint? = null
 
-    // Device listener to handle device attach/detach
-    private val externalNfcDeviceListener = object : ExternalNfcDeviceListener {
-        override fun onAttached(device: ExternalNfcDevice) {
-            Log.d(TAG, "NFC Device attached: ${device.name}")
-            try {
-                nfcProvider = device.createProvider(this@NfcBridgeService)
-                nfcProvider?.setExternalNfcTagListener(this@NfcBridgeService)
-                nfcProvider?.start()
-                Toast.makeText(this@NfcBridgeService, "NFC Provider Started", Toast.LENGTH_SHORT).show()
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start provider", e)
-                stopSelf()
-            }
-        }
-
-        override fun onDetached(device: ExternalNfcDevice) {
-            Log.d(TAG, "NFC Device detached: ${device.name}")
-            nfcProvider?.stop()
-            nfcProvider = null
-        }
-    }
+    private val executor = Executors.newSingleThreadExecutor()
+    private var isPolling = false
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Service created")
-
-        createNotificationChannel()
         usbManager = getSystemService(Context.USB_SERVICE) as UsbManager
-
-        // Start the ExternalNfcManager
-        externalNfcManager = ExternalNfcManager(this, externalNfcDeviceListener)
-        externalNfcManager?.start()
+        registerUsbReceiver(IntentFilter(ACTION_USB_PERMISSION))
+        registerUsbReceiver(IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         isServiceRunning = true
-        createNotificationChannel()
-        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("External NFC Active")
-            .setContentText("ACR122U Bridge Service is running.")
-            .setSmallIcon(R.drawable.ic_stat_nfc)
-            .setOngoing(true)
-            .build()
+        startInForeground()
+        findAndConnectDevice()
+        return START_STICKY
+    }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    private fun registerUsbReceiver(filter: IntentFilter) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(usbReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(usbReceiver, filter)
+        }
+    }
+
+    private fun findAndConnectDevice() {
+        val deviceList = usbManager.deviceList
+        for (device in deviceList.values) {
+            if (device.vendorId == VID && device.productId == PID) {
+                requestPermission(device)
+                return
+            }
+        }
+        Toast.makeText(this, "ACR122U not found. Please connect via OTG.", Toast.LENGTH_LONG).show()
+    }
+
+    private fun requestPermission(device: UsbDevice) {
+        if (usbManager.hasPermission(device)) {
+            connectToDevice(device)
+        } else {
+            val permissionIntent = PendingIntent.getBroadcast(
+                this, 0, Intent(ACTION_USB_PERMISSION), PendingIntent.FLAG_IMMUTABLE
+            )
+            usbManager.requestPermission(device, permissionIntent)
+        }
+    }
+
+    private fun connectToDevice(device: UsbDevice) {
+        try {
+            val connection = usbManager.openDevice(device) ?: return
+            val iface = device.getInterface(0)
+            
+            if (connection.claimInterface(iface, true)) {
+                usbDevice = device
+                usbConnection = connection
+                usbInterface = iface
+                
+                // Endpoints: 0 is Out, 1 is In
+                endpointOut = iface.getEndpoint(0)
+                endpointIn = iface.getEndpoint(1)
+
+                startPolling()
+                Toast.makeText(this, "ACR122U Connected!", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "Device connected and interface claimed.")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Connection failed", e)
+        }
+    }
+
+    private fun startPolling() {
+        if (isPolling) return
+        isPolling = true
+        executor.execute {
+            // 1. Power on ICC (CCID Command 0x62)
+            powerOnIcc()
+            
+            var lastId: String? = null
+            
+            while (isPolling) {
+                val tagId = getCardUid()
+                if (tagId != null && tagId != lastId) {
+                    lastId = tagId
+                    onTagDetected(tagId)
+                } else if (tagId == null) {
+                    lastId = null // Tag removed
+                }
+                Thread.sleep(500) // Poll every 500ms
+            }
+        }
+    }
+
+    private fun powerOnIcc() {
+        val command = byteArrayOf(0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+        usbConnection?.bulkTransfer(endpointOut, command, command.size, 1000)
+        val response = ByteArray(64)
+        usbConnection?.bulkTransfer(endpointIn, response, response.size, 1000)
+    }
+
+    private fun getCardUid(): String? {
+        // CCID Transfer Block + Get UID APDU (FF CA 00 00 00)
+        val apdu = byteArrayOf(0xFF.toByte(), 0xCA.toByte(), 0x00, 0x00, 0x00)
+        val ccidHeader = byteArrayOf(
+            0x6F.toByte(), 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+        )
+        val command = ccidHeader + apdu
+        
+        usbConnection?.bulkTransfer(endpointOut, command, command.size, 500)
+        
+        val response = ByteArray(64)
+        val len = usbConnection?.bulkTransfer(endpointIn, response, response.size, 500) ?: 0
+        
+        // CCID response is 10 bytes header + Data + SW1/SW2
+        if (len > 12 && response[10].toInt() != 0) {
+            val uidBytes = response.copyOfRange(10, len - 2)
+            return uidBytes.joinToString("") { "%02x".format(it) }
+        }
+        return null
+    }
+
+    private fun onTagDetected(uid: String) {
+        Log.d(TAG, "Tag Detected: $uid")
+        
+        // Create standard Android NFC Intents
+        val intent = Intent(NfcAdapter.ACTION_TAG_DISCOVERED).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(NfcAdapter.EXTRA_ID, uid.decodeHex())
+        }
+        
+        // Also try NDEF discovered if we had a message (omitted for brevity)
+        sendBroadcast(intent)
+        
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(this, "NFC Tag Detected: $uid", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun startInForeground() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                NOTIFICATION_CHANNEL_ID, "NFC Bridge", NotificationManager.IMPORTANCE_LOW
+            )
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+        }
+        val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+            .setContentTitle("NFC Bridge Active")
+            .setContentText("Listening for ACR122U tags...")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .build()
+        
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
-
-        return START_STICKY
     }
 
-    override fun onTagDetected(tag: ExternalNfcTag) {
-        Log.d(TAG, "NFC Tag detected: ${tag.id?.toHexString() ?: "(null ID)"}")
-        
-        // Attempt to broadcast to any app listening for NFC intents
-        broadcastNfcIntents(tag)
-    }
-
-    private fun broadcastNfcIntents(externalTag: ExternalNfcTag) {
-        val ndefMessage = externalTag.ndefMessage
-        val tagId = externalTag.id
-
-        // 1. NDEF_DISCOVERED (Highest priority)
-        if (ndefMessage != null) {
-            val ndefIntent = Intent(NfcAdapter.ACTION_NDEF_DISCOVERED).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                putExtra(NfcAdapter.EXTRA_NDEF_MESSAGES, arrayOf(ndefMessage))
-                putExtra(NfcAdapter.EXTRA_ID, tagId)
-                // We cannot easily create a real android.nfc.Tag object without internal APIs, 
-                // but many apps just look for EXTRA_NDEF_MESSAGES
-            }
-            try {
-                // Try starting an activity first (to "wake up" apps)
-                startActivity(ndefIntent)
-                Log.d(TAG, "Started Activity for NDEF_DISCOVERED")
-            } catch (e: Exception) {
-                // If no activity found, just broadcast it
-                sendBroadcast(ndefIntent)
-                Log.d(TAG, "Broadcasted NDEF_DISCOVERED (No Activity found)")
+    private val usbReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                ACTION_USB_PERMISSION -> {
+                    val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                    if (intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+                        device?.let { connectToDevice(it) }
+                    }
+                }
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                    val device = intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                    if (device?.vendorId == VID && device?.productId == PID) {
+                        disconnectDevice()
+                    }
+                }
             }
         }
-
-        // 2. TECH_DISCOVERED (Fallback)
-        val techIntent = Intent(NfcAdapter.ACTION_TECH_DISCOVERED).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(NfcAdapter.EXTRA_ID, tagId)
-            // Some apps look for this to handle raw tags
-        }
-        sendBroadcast(techIntent)
-
-        // 3. TAG_DISCOVERED (General)
-        val tagIntent = Intent(NfcAdapter.ACTION_TAG_DISCOVERED).apply {
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            putExtra(NfcAdapter.EXTRA_ID, tagId)
-        }
-        sendBroadcast(tagIntent)
-
-        Toast.makeText(this, "NFC Tag Forwarded to System!", Toast.LENGTH_SHORT).show()
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val serviceChannel = NotificationChannel(
-                NOTIFICATION_CHANNEL_ID,
-                "NFC Bridge Service Channel",
-                NotificationManager.IMPORTANCE_DEFAULT
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(serviceChannel)
-        }
+    private fun disconnectDevice() {
+        isPolling = false
+        usbConnection?.close()
+        usbConnection = null
+        usbDevice = null
+        Toast.makeText(this, "ACR122U Disconnected", Toast.LENGTH_SHORT).show()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        nfcProvider?.stop()
-        externalNfcManager?.stop()
+        disconnectDevice()
+        unregisterReceiver(usbReceiver)
+        executor.shutdownNow()
         isServiceRunning = false
-        Log.d(TAG, "NFC Bridge Service stopped.")
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-}
+    override fun onBind(intent: Intent?) = null
 
-// Extension function for logging byte arrays
-fun ByteArray.toHexString() = joinToString("") { "%02x".format(it) }
+    private fun String.decodeHex(): ByteArray {
+        return chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+    }
+}

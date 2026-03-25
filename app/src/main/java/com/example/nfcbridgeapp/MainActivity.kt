@@ -3,6 +3,7 @@ package com.example.nfcbridgeapp // Make sure this matches your package name
 import android.content.Intent
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.example.nfcbridgeapp.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
@@ -30,7 +31,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startNfcService() {
         val serviceIntent = Intent(this, NfcBridgeService::class.java)
-        startService(serviceIntent)
+        ContextCompat.startForegroundService(this, serviceIntent)
         updateUI()
     }
 

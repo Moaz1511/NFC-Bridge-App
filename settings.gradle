@@ -10,7 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        // This line tells Gradle WHERE to find the NFC library
         maven { url 'https://jitpack.io' }
     }
 }
