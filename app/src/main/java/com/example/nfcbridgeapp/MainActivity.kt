@@ -17,6 +17,10 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
     private var lastUid: String? = null
+    private var lastAts: String? = null
+    private var lastCardType: String? = null
+    private var lastSeenAt: Long = 0L
+    private var lastReaderName: String? = null
 
     private val statusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -26,6 +30,10 @@ class MainActivity : AppCompatActivity() {
                 serviceRunning = intent.getBooleanExtra(NfcBridgeService.EXTRA_SERVICE_RUNNING, false),
                 readerConnected = intent.getBooleanExtra(NfcBridgeService.EXTRA_READER_CONNECTED, false),
                 uid = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_UID),
+                ats = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_ATS),
+                cardType = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_CARD_TYPE),
+                seenAt = intent.getLongExtra(NfcBridgeService.EXTRA_LAST_SEEN_AT, 0L),
+                readerName = intent.getStringExtra(NfcBridgeService.EXTRA_READER_NAME),
                 message = intent.getStringExtra(NfcBridgeService.EXTRA_STATUS_MESSAGE)
                     ?: getString(R.string.status_idle)
             )
@@ -61,10 +69,18 @@ class MainActivity : AppCompatActivity() {
             Toast.makeText(this, R.string.copy_uid_success, Toast.LENGTH_SHORT).show()
         }
 
+        binding.btnCardDetails.setOnClickListener {
+            openCardDetailsScreen()
+        }
+
         renderState(
             serviceRunning = NfcBridgeService.isServiceRunning,
             readerConnected = false,
             uid = null,
+            ats = null,
+            cardType = null,
+            seenAt = 0L,
+            readerName = null,
             message = getString(R.string.status_idle)
         )
     }
@@ -101,9 +117,17 @@ class MainActivity : AppCompatActivity() {
         serviceRunning: Boolean,
         readerConnected: Boolean,
         uid: String?,
+        ats: String?,
+        cardType: String?,
+        seenAt: Long,
+        readerName: String?,
         message: String
     ) {
         lastUid = uid
+        lastAts = ats
+        lastCardType = cardType
+        lastSeenAt = seenAt
+        lastReaderName = readerName
 
         binding.tvServiceValue.text = if (serviceRunning) {
             getString(R.string.service_running)
@@ -126,5 +150,23 @@ class MainActivity : AppCompatActivity() {
         }
         binding.btnRefreshReader.isEnabled = serviceRunning
         binding.btnCopyUid.isEnabled = !uid.isNullOrBlank()
+        binding.btnCardDetails.isEnabled = !uid.isNullOrBlank()
+    }
+
+    private fun openCardDetailsScreen() {
+        val uid = lastUid
+        if (uid.isNullOrBlank()) {
+            Toast.makeText(this, R.string.card_details_unavailable, Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        startActivity(
+            Intent(this, CardDetailsActivity::class.java)
+                .putExtra(CardDetailsActivity.EXTRA_UID, uid)
+                .putExtra(CardDetailsActivity.EXTRA_ATS, lastAts)
+                .putExtra(CardDetailsActivity.EXTRA_CARD_TYPE, lastCardType)
+                .putExtra(CardDetailsActivity.EXTRA_SEEN_AT, lastSeenAt)
+                .putExtra(CardDetailsActivity.EXTRA_READER_NAME, lastReaderName)
+        )
     }
 }

@@ -22,6 +22,7 @@ import android.os.Parcelable
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import java.util.Locale
 import java.util.concurrent.Executors
 
 class NfcBridgeService : Service() {
@@ -40,11 +41,16 @@ class NfcBridgeService : Service() {
         const val EXTRA_SERVICE_RUNNING = "extra_service_running"
         const val EXTRA_READER_CONNECTED = "extra_reader_connected"
         const val EXTRA_LAST_UID = "extra_last_uid"
+        const val EXTRA_LAST_ATS = "extra_last_ats"
+        const val EXTRA_LAST_CARD_TYPE = "extra_last_card_type"
+        const val EXTRA_LAST_SEEN_AT = "extra_last_seen_at"
+        const val EXTRA_READER_NAME = "extra_reader_name"
         const val EXTRA_STATUS_MESSAGE = "extra_status_message"
 
         private const val VID = 0x072F
         private const val PID = 0x2200
         private const val CCID_HEADER_SIZE = 10
+        private const val REMOVAL_CONFIRMATION_READS = 3
 
         var isServiceRunning = false
     }
@@ -59,7 +65,17 @@ class NfcBridgeService : Service() {
     private var isPolling = false
     private var readerConnected = false
     private var lastUid: String? = null
+    private var lastAts: String? = null
+    private var lastCardType: String? = null
+    private var lastSeenAt: Long = 0L
     private var statusMessage: String = ""
+
+    private data class CardSnapshot(
+        val uid: String,
+        val ats: String?,
+        val cardType: String,
+        val seenAt: Long,
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -148,6 +164,9 @@ class NfcBridgeService : Service() {
         if (device == null) {
             readerConnected = false
             lastUid = null
+            lastAts = null
+            lastCardType = null
+            lastSeenAt = 0L
             statusMessage = getString(R.string.status_reader_not_found)
             broadcastStatus()
             toast(statusMessage)
@@ -259,15 +278,28 @@ class NfcBridgeService : Service() {
             powerOnIcc()
 
             var previousUid: String? = null
+            var missedReads = 0
             while (isPolling) {
                 try {
-                    val uid = getCardUid()
-                    if (uid != null && uid != previousUid) {
-                        previousUid = uid
-                        onTagDetected(uid)
-                    } else if (uid == null && previousUid != null) {
+                    val snapshot = readCardSnapshot()
+                    if (snapshot != null && snapshot.uid != previousUid) {
+                        missedReads = 0
+                        previousUid = snapshot.uid
+                        onTagDetected(snapshot)
+                    } else if (snapshot != null) {
+                        missedReads = 0
+                    } else if (previousUid != null) {
+                        missedReads += 1
+                        if (missedReads < REMOVAL_CONFIRMATION_READS) {
+                            Thread.sleep(500)
+                            continue
+                        }
                         previousUid = null
+                        missedReads = 0
                         lastUid = null
+                        lastAts = null
+                        lastCardType = null
+                        lastSeenAt = 0L
                         statusMessage = getString(R.string.status_waiting_for_card)
                         broadcastStatus()
                     }
@@ -330,20 +362,56 @@ class NfcBridgeService : Service() {
     private fun getCardUid(): String? {
         val apdu = byteArrayOf(0xFF.toByte(), 0xCA.toByte(), 0x00, 0x00, 0x00)
         val response = transmitApdu(apdu, timeoutMs = 500) ?: return null
-        val len = response.size
-        if (len > 12 && response[10].toInt() != 0) {
-            val uidBytes = response.copyOfRange(10, len - 2)
-            return uidBytes.joinToString("") { "%02X".format(it) }
-        }
-        return null
+        val payload = extractPayload(response) ?: return null
+        return payload.toHexString(compact = true)
     }
 
-    private fun onTagDetected(uid: String) {
-        lastUid = uid
-        statusMessage = getString(R.string.status_tag_detected, uid)
+    private fun getCardAts(): String? {
+        val apdu = byteArrayOf(0xFF.toByte(), 0xCA.toByte(), 0x01, 0x00, 0x00)
+        val response = transmitApdu(apdu, timeoutMs = 500) ?: return null
+        val payload = extractPayload(response) ?: return null
+        return payload.toHexString(compact = false)
+    }
+
+    private fun readCardSnapshot(): CardSnapshot? {
+        val uid = getCardUid() ?: return null
+        val ats = getCardAts()
+        val cardType = if (ats.isNullOrBlank()) {
+            getString(R.string.card_type_unknown)
+        } else {
+            getString(R.string.card_type_iso14443a)
+        }
+        return CardSnapshot(
+            uid = uid,
+            ats = ats,
+            cardType = cardType,
+            seenAt = System.currentTimeMillis()
+        )
+    }
+
+    private fun extractPayload(response: ByteArray): ByteArray? {
+        if (response.size <= CCID_HEADER_SIZE + 2) {
+            return null
+        }
+
+        val sw1 = response[response.size - 2]
+        val sw2 = response[response.size - 1]
+        if (sw1 != 0x90.toByte() || sw2 != 0x00.toByte()) {
+            return null
+        }
+
+        return response.copyOfRange(CCID_HEADER_SIZE, response.size - 2)
+    }
+
+    private fun onTagDetected(snapshot: CardSnapshot) {
+        lastUid = snapshot.uid
+        lastAts = snapshot.ats
+        lastCardType = snapshot.cardType
+        lastSeenAt = snapshot.seenAt
+        statusMessage = getString(R.string.status_tag_detected, snapshot.uid)
         broadcastStatus()
         toast(statusMessage)
-        Log.d(TAG, "Tag detected: $uid")
+        Log.d(TAG, "Tag detected: ${snapshot.uid}")
     }
 
     private fun disconnectDevice() {
@@ -366,8 +434,26 @@ class NfcBridgeService : Service() {
             .putExtra(EXTRA_SERVICE_RUNNING, isServiceRunning)
             .putExtra(EXTRA_READER_CONNECTED, readerConnected)
             .putExtra(EXTRA_LAST_UID, lastUid)
+            .putExtra(EXTRA_LAST_ATS, lastAts)
+            .putExtra(EXTRA_LAST_CARD_TYPE, lastCardType)
+            .putExtra(EXTRA_LAST_SEEN_AT, lastSeenAt)
+            .putExtra(EXTRA_READER_NAME, usbDevice?.let { getReaderName(it) })
             .putExtra(EXTRA_STATUS_MESSAGE, statusMessage)
         sendBroadcast(intent)
+    }
+
+    private fun getReaderName(device: UsbDevice): String {
+        val productName = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            device.productName
+        } else {
+            null
+        }
+        return productName ?: String.format(
+            Locale.US,
+            "ACR122U (%04X:%04X)",
+            device.vendorId,
+            device.productId
+        )
     }
 
     private fun toast(message: String) {
@@ -412,6 +498,9 @@ class NfcBridgeService : Service() {
                     if (device?.vendorId == VID && device.productId == PID) {
                         disconnectDevice()
                         lastUid = null
+                        lastAts = null
+                        lastCardType = null
+                        lastSeenAt = 0L
                         statusMessage = getString(R.string.status_reader_detached)
                         broadcastStatus()
                         toast(statusMessage)
@@ -427,10 +516,21 @@ class NfcBridgeService : Service() {
         executor.shutdownNow()
         isServiceRunning = false
         lastUid = null
+        lastAts = null
+        lastCardType = null
+        lastSeenAt = 0L
         statusMessage = getString(R.string.status_service_stopped)
         broadcastStatus()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?) = null
+
+    private fun ByteArray.toHexString(compact: Boolean): String {
+        return if (compact) {
+            joinToString(separator = "") { "%02X".format(it) }
+        } else {
+            joinToString(separator = " ") { "%02X".format(it) }
+        }
+    }
 }
