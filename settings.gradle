@@ -1,0 +1,18 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // This line tells Gradle WHERE to find the NFC library
+        maven { url 'https://jitpack.io' }
+    }
+}
+rootProject.name = "NFC Bridge App"
+include ':app'
