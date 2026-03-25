@@ -1,7 +1,14 @@
-package com.example.nfcbridgeapp // Make sure this matches your package name
+package com.example.nfcbridgeapp
 
+import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.example.nfcbridgeapp.databinding.ActivityMainBinding
@@ -9,6 +16,21 @@ import com.example.nfcbridgeapp.databinding.ActivityMainBinding
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var lastUid: String? = null
+
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != NfcBridgeService.ACTION_STATUS_UPDATE) return
+
+            renderState(
+                serviceRunning = intent.getBooleanExtra(NfcBridgeService.EXTRA_SERVICE_RUNNING, false),
+                readerConnected = intent.getBooleanExtra(NfcBridgeService.EXTRA_READER_CONNECTED, false),
+                uid = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_UID),
+                message = intent.getStringExtra(NfcBridgeService.EXTRA_STATUS_MESSAGE)
+                    ?: getString(R.string.status_idle)
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -17,37 +39,92 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnToggleService.setOnClickListener {
             if (NfcBridgeService.isServiceRunning) {
-                stopNfcService()
+                stopService(Intent(this, NfcBridgeService::class.java))
             } else {
-                startNfcService()
+                sendServiceCommand(NfcBridgeService.ACTION_START)
             }
         }
-    }
 
-    override fun onResume() {
-        super.onResume()
-        updateUI()
-    }
-
-    private fun startNfcService() {
-        val serviceIntent = Intent(this, NfcBridgeService::class.java)
-        ContextCompat.startForegroundService(this, serviceIntent)
-        updateUI()
-    }
-
-    private fun stopNfcService() {
-        val serviceIntent = Intent(this, NfcBridgeService::class.java)
-        stopService(serviceIntent)
-        updateUI()
-    }
-
-    private fun updateUI() {
-        if (NfcBridgeService.isServiceRunning) {
-            binding.tvStatus.text = "Service is Running"
-            binding.btnToggleService.text = "Stop NFC Service"
-        } else {
-            binding.tvStatus.text = "Service is Stopped"
-            binding.btnToggleService.text = "Start NFC Service"
+        binding.btnRefreshReader.setOnClickListener {
+            sendServiceCommand(NfcBridgeService.ACTION_REFRESH_READER)
         }
+
+        binding.btnCopyUid.setOnClickListener {
+            val uid = lastUid
+            if (uid.isNullOrBlank()) {
+                Toast.makeText(this, R.string.copy_uid_unavailable, Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText(getString(R.string.uid_label), uid))
+            Toast.makeText(this, R.string.copy_uid_success, Toast.LENGTH_SHORT).show()
+        }
+
+        renderState(
+            serviceRunning = NfcBridgeService.isServiceRunning,
+            readerConnected = false,
+            uid = null,
+            message = getString(R.string.status_idle)
+        )
+    }
+
+    override fun onStart() {
+        super.onStart()
+        registerStatusReceiver()
+        if (NfcBridgeService.isServiceRunning) {
+            sendServiceCommand(NfcBridgeService.ACTION_REQUEST_STATUS)
+        }
+    }
+
+    override fun onStop() {
+        unregisterReceiver(statusReceiver)
+        super.onStop()
+    }
+
+    private fun registerStatusReceiver() {
+        val filter = IntentFilter(NfcBridgeService.ACTION_STATUS_UPDATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(statusReceiver, filter)
+        }
+    }
+
+    private fun sendServiceCommand(action: String) {
+        val intent = Intent(this, NfcBridgeService::class.java).setAction(action)
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun renderState(
+        serviceRunning: Boolean,
+        readerConnected: Boolean,
+        uid: String?,
+        message: String
+    ) {
+        lastUid = uid
+
+        binding.tvServiceValue.text = if (serviceRunning) {
+            getString(R.string.service_running)
+        } else {
+            getString(R.string.service_stopped)
+        }
+
+        binding.tvReaderValue.text = if (readerConnected) {
+            getString(R.string.reader_connected)
+        } else {
+            getString(R.string.reader_disconnected)
+        }
+
+        binding.tvLastUidValue.text = uid ?: getString(R.string.uid_placeholder)
+        binding.tvMessageValue.text = message
+        binding.btnToggleService.text = if (serviceRunning) {
+            getString(R.string.stop_service)
+        } else {
+            getString(R.string.start_service)
+        }
+        binding.btnRefreshReader.isEnabled = serviceRunning
+        binding.btnCopyUid.isEnabled = !uid.isNullOrBlank()
     }
 }
