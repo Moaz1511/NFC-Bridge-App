@@ -97,20 +97,51 @@ class NfcBridgeService : Service(), ExternalNfcTagListener {
 
     override fun onTagDetected(tag: ExternalNfcTag) {
         Log.d(TAG, "NFC Tag detected: ${tag.id?.toHexString() ?: "(null ID)"}")
-        tag.ndefMessage?.let {
-            broadcastNdefMessage(it)
-        } ?: run {
-            Toast.makeText(this, "No NDEF message, raw read needed", Toast.LENGTH_SHORT).show()
-        }
+        
+        // Attempt to broadcast to any app listening for NFC intents
+        broadcastNfcIntents(tag)
     }
 
-    private fun broadcastNdefMessage(ndefMessage: NdefMessage) {
-        val intent = Intent(NfcAdapter.ACTION_NDEF_DISCOVERED)
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        intent.putExtra(NfcAdapter.EXTRA_NDEF_MESSAGES, arrayOf(ndefMessage))
-        sendBroadcast(intent)
-        Toast.makeText(this, "NFC Tag Data Broadcasted!", Toast.LENGTH_SHORT).show()
-        Log.d(TAG, "Broadcasted NDEF message.")
+    private fun broadcastNfcIntents(externalTag: ExternalNfcTag) {
+        val ndefMessage = externalTag.ndefMessage
+        val tagId = externalTag.id
+
+        // 1. NDEF_DISCOVERED (Highest priority)
+        if (ndefMessage != null) {
+            val ndefIntent = Intent(NfcAdapter.ACTION_NDEF_DISCOVERED).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                putExtra(NfcAdapter.EXTRA_NDEF_MESSAGES, arrayOf(ndefMessage))
+                putExtra(NfcAdapter.EXTRA_ID, tagId)
+                // We cannot easily create a real android.nfc.Tag object without internal APIs, 
+                // but many apps just look for EXTRA_NDEF_MESSAGES
+            }
+            try {
+                // Try starting an activity first (to "wake up" apps)
+                startActivity(ndefIntent)
+                Log.d(TAG, "Started Activity for NDEF_DISCOVERED")
+            } catch (e: Exception) {
+                // If no activity found, just broadcast it
+                sendBroadcast(ndefIntent)
+                Log.d(TAG, "Broadcasted NDEF_DISCOVERED (No Activity found)")
+            }
+        }
+
+        // 2. TECH_DISCOVERED (Fallback)
+        val techIntent = Intent(NfcAdapter.ACTION_TECH_DISCOVERED).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(NfcAdapter.EXTRA_ID, tagId)
+            // Some apps look for this to handle raw tags
+        }
+        sendBroadcast(techIntent)
+
+        // 3. TAG_DISCOVERED (General)
+        val tagIntent = Intent(NfcAdapter.ACTION_TAG_DISCOVERED).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            putExtra(NfcAdapter.EXTRA_ID, tagId)
+        }
+        sendBroadcast(tagIntent)
+
+        Toast.makeText(this, "NFC Tag Forwarded to System!", Toast.LENGTH_SHORT).show()
     }
 
     private fun createNotificationChannel() {
