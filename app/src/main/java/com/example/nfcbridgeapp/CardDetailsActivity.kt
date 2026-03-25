@@ -1,7 +1,13 @@
 package com.example.nfcbridgeapp
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.os.Build
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.example.nfcbridgeapp.databinding.ActivityCardDetailsBinding
 import java.text.DateFormat
 import java.util.Date
@@ -18,6 +24,20 @@ class CardDetailsActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityCardDetailsBinding
 
+    private val statusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != NfcBridgeService.ACTION_STATUS_UPDATE) return
+
+            renderDetails(
+                uid = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_UID),
+                ats = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_ATS),
+                cardType = intent.getStringExtra(NfcBridgeService.EXTRA_LAST_CARD_TYPE),
+                seenAt = intent.getLongExtra(NfcBridgeService.EXTRA_LAST_SEEN_AT, 0L),
+                readerName = intent.getStringExtra(NfcBridgeService.EXTRA_READER_NAME),
+            )
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityCardDetailsBinding.inflate(layoutInflater)
@@ -27,29 +47,64 @@ class CardDetailsActivity : AppCompatActivity() {
             finish()
         }
 
-        val uid = intent.getStringExtra(EXTRA_UID).orEmpty()
-        val ats = intent.getStringExtra(EXTRA_ATS)
-        val cardType = intent.getStringExtra(EXTRA_CARD_TYPE)
-        val seenAt = intent.getLongExtra(EXTRA_SEEN_AT, 0L)
-        val readerName = intent.getStringExtra(EXTRA_READER_NAME)
+        renderDetails(
+            uid = intent.getStringExtra(EXTRA_UID),
+            ats = intent.getStringExtra(EXTRA_ATS),
+            cardType = intent.getStringExtra(EXTRA_CARD_TYPE),
+            seenAt = intent.getLongExtra(EXTRA_SEEN_AT, 0L),
+            readerName = intent.getStringExtra(EXTRA_READER_NAME),
+        )
+    }
 
-        val uidBytes = if (uid.isBlank()) {
+    override fun onStart() {
+        super.onStart()
+        registerStatusReceiver()
+        if (NfcBridgeService.isServiceRunning) {
+            sendServiceCommand(NfcBridgeService.ACTION_REQUEST_STATUS)
+        }
+    }
+
+    override fun onStop() {
+        unregisterReceiver(statusReceiver)
+        super.onStop()
+    }
+
+    private fun registerStatusReceiver() {
+        val filter = IntentFilter(NfcBridgeService.ACTION_STATUS_UPDATE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(statusReceiver, filter)
+        }
+    }
+
+    private fun sendServiceCommand(action: String) {
+        val intent = Intent(this, NfcBridgeService::class.java).setAction(action)
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun renderDetails(
+        uid: String?,
+        ats: String?,
+        cardType: String?,
+        seenAt: Long,
+        readerName: String?,
+    ) {
+        val safeUid = uid?.takeIf { it.isNotBlank() }
+        val uidBytes = if (safeUid == null) {
             getString(R.string.card_detail_not_available)
         } else {
-            uid.chunked(2).joinToString(" ")
+            safeUid.chunked(2).joinToString(" ")
         }
-        val uidLength = if (uid.isBlank()) 0 else uid.length / 2
+        val uidLength = if (safeUid == null) 0 else safeUid.length / 2
         val seenAtText = if (seenAt > 0L) {
             DateFormat.getDateTimeInstance().format(Date(seenAt))
         } else {
             getString(R.string.card_detail_not_available)
         }
 
-        binding.tvUidValue.text = if (uid.isBlank()) {
-            getString(R.string.card_detail_not_available)
-        } else {
-            uid
-        }
+        binding.tvUidValue.text = safeUid ?: getString(R.string.card_detail_not_available)
         binding.tvUidBytesValue.text = uidBytes
         binding.tvUidLengthValue.text = if (uidLength == 0) {
             getString(R.string.card_detail_not_available)
