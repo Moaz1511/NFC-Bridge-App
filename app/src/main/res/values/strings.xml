@@ -36,6 +36,7 @@
     <string name="status_reader_ready">Reader already connected and polling.</string>
     <string name="status_waiting_for_card">Reader ready. Hold a card on the ACR122U pad.</string>
     <string name="status_tag_detected">Card detected. UID: %1$s</string>
+    <string name="status_power_on_failed">Reader power on failed. Try reconnecting the device.</string>
     <string name="status_polling_error">Reader polling stopped: %1$s</string>
     <string name="status_permission_denied">USB permission denied for the ACR122U reader.</string>
     <string name="status_reader_attached">Reader attached. Attempting connection.</string>

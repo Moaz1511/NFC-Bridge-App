@@ -44,6 +44,7 @@ class NfcBridgeService : Service() {
 
         private const val VID = 0x072F
         private const val PID = 0x2200
+        private const val CCID_HEADER_SIZE = 10
 
         var isServiceRunning = false
     }
@@ -289,21 +290,47 @@ class NfcBridgeService : Service() {
         val command = byteArrayOf(0x62, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
         usbConnection?.bulkTransfer(endpointOut, command, command.size, 1000)
         val response = ByteArray(64)
-        usbConnection?.bulkTransfer(endpointIn, response, response.size, 1000)
-        statusMessage = getString(R.string.status_waiting_for_card)
-        broadcastStatus()
+        val len = usbConnection?.bulkTransfer(endpointIn, response, response.size, 1000) ?: 0
+        if (len > 0) {
+            statusMessage = getString(R.string.status_waiting_for_card)
+            broadcastStatus()
+        } else {
+            statusMessage = getString(R.string.status_power_on_failed)
+            broadcastStatus()
+        }
+    }
+
+    private fun transmitApdu(apdu: ByteArray, timeoutMs: Int = 1000): ByteArray? {
+        val out = endpointOut ?: return null
+        val input = endpointIn ?: return null
+        val connection = usbConnection ?: return null
+
+        val command = ByteArray(CCID_HEADER_SIZE + apdu.size)
+        command[0] = 0x6F.toByte()
+        command[1] = (apdu.size and 0xFF).toByte()
+        command[2] = ((apdu.size shr 8) and 0xFF).toByte()
+        command[3] = ((apdu.size shr 16) and 0xFF).toByte()
+        command[4] = ((apdu.size shr 24) and 0xFF).toByte()
+        apdu.copyInto(command, destinationOffset = CCID_HEADER_SIZE)
+
+        val written = connection.bulkTransfer(out, command, command.size, timeoutMs)
+        if (written <= 0) {
+            return null
+        }
+
+        val response = ByteArray(300)
+        val len = connection.bulkTransfer(input, response, response.size, timeoutMs)
+        if (len <= CCID_HEADER_SIZE) {
+            return null
+        }
+
+        return response.copyOf(len)
     }
 
     private fun getCardUid(): String? {
         val apdu = byteArrayOf(0xFF.toByte(), 0xCA.toByte(), 0x00, 0x00, 0x00)
-        val ccidHeader = byteArrayOf(
-            0x6F.toByte(), 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        )
-        val command = ccidHeader + apdu
-        usbConnection?.bulkTransfer(endpointOut, command, command.size, 500)
-
-        val response = ByteArray(64)
-        val len = usbConnection?.bulkTransfer(endpointIn, response, response.size, 500) ?: 0
+        val response = transmitApdu(apdu, timeoutMs = 500) ?: return null
+        val len = response.size
         if (len > 12 && response[10].toInt() != 0) {
             val uidBytes = response.copyOfRange(10, len - 2)
             return uidBytes.joinToString("") { "%02X".format(it) }
